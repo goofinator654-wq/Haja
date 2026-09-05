@@ -1,5 +1,5 @@
 --[[=====================================================================
-    HAJA UI  ·  v1.0.0
+    HAJA UI  ·  v1.0.1
     A premium, clean, mobile + PC ready UI library for Roblox.
 
     > Better than Rayfield. Smoother. Cleaner. Prettier.
@@ -85,7 +85,7 @@ local LocalPlayer = Players.LocalPlayer
 local Haja = {}
 Haja.__index = Haja
 
-Haja.Version = "1.0.0"
+Haja.Version = "1.0.1"
 Haja.Themes  = {
     Midnight  = {
         Accent        = Color3.fromRGB(124, 92, 255),
@@ -132,15 +132,8 @@ Window.__index = Window
 local Windows = {}
 local Flags = {}
 local ConfigFolder = "HajaUI"
-local Connections = {}
 
 local function theme() return Theme end
-
-local function connect(signal, fn)
-    local c = signal:Connect(fn)
-    table.insert(Connections, c)
-    return c
-end
 
 local function tween(obj, props, time, style, dir)
     local t = TweenService:Create(
@@ -238,10 +231,15 @@ local function saveConfig(key)
         if not isfolder(ConfigFolder) then makefolder(ConfigFolder) end
         local data = {}
         for flag, value in pairs(Flags) do
-            if typeof(value) ~= "Instance" and typeof(value) ~= "function" and typeof(value) ~= "table" then
-                data[flag] = value
-            elseif typeof(value) == "table" then
-                data[flag] = value
+            local t = typeof(value)
+            -- JSON can't encode Color3 / Instance / functions, so keep only
+            -- plain data and convert Color3 into a tagged table.
+            if t ~= "Instance" and t ~= "function" then
+                if t == "Color3" then
+                    data[flag] = { __haja_color = true, r = value.R, g = value.G, b = value.B }
+                else
+                    data[flag] = value
+                end
             end
         end
         writefile(ConfigFolder .. "/" .. tostring(key) .. ".json", HttpService:JSONEncode(data))
@@ -253,11 +251,31 @@ local function loadConfig(key)
     local ok, result = pcall(function()
         local path = ConfigFolder .. "/" .. tostring(key) .. ".json"
         if isfile(path) then
-            return HttpService:JSONDecode(readfile(path))
+            local decoded = HttpService:JSONDecode(readfile(path))
+            for k, v in pairs(decoded) do
+                if type(v) == "table" and v.__haja_color then
+                    decoded[k] = Color3.new(v.r, v.g, v.b)
+                end
+            end
+            return decoded
         end
         return {}
     end)
     return ok and result or {}
+end
+
+-- Debounced auto-save: fires shortly after a flag changes (client-safe,
+-- unlike game:BindToClose which is server-only)
+local savePending = false
+local function scheduleAutoSave()
+    if savePending then return end
+    savePending = true
+    task.delay(0.5, function()
+        savePending = false
+        for _, w in ipairs(Windows) do
+            saveConfig(w._cfgKey)
+        end
+    end)
 end
 
 --////////////////////////////////////////////////////////////////////////
@@ -464,6 +482,12 @@ function Haja:CreateWindow(cfg)
         return btn
     end
 
+    -- Per-window connection registry: listeners that outlive the GUI (drag,
+    -- resize, slider drags, keybinds) are tracked here so closing a window
+    -- only cleans up ITS OWN connections and never kills other windows.
+    local conns = {}
+    local closeWindow
+
     local minimized = false
     iconButton("—", -10, function()
         minimized = not minimized
@@ -473,10 +497,8 @@ function Haja:CreateWindow(cfg)
     iconButton("✕", -44, function()
         tween(main, { Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1 }, 0.25)
         task.delay(0.25, function()
-            gui:Destroy()
+            if closeWindow then closeWindow() end
         end)
-        for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
-        table.clear(Connections)
     end)
 
     -- Draggable (PC + mobile)
@@ -507,7 +529,7 @@ function Haja:CreateWindow(cfg)
             end
         end)
 
-        UserInputService.InputChanged:Connect(function(input)
+        local dragConn = UserInputService.InputChanged:Connect(function(input)
             if input == dragInput and dragging then
                 local delta = input.Position - dragStart
                 main.Position = UDim2.new(
@@ -516,6 +538,7 @@ function Haja:CreateWindow(cfg)
                 )
             end
         end)
+        table.insert(conns, dragConn)
     end
 
     -- Resize handle (PC only)
@@ -537,12 +560,13 @@ function Haja:CreateWindow(cfg)
                     startSize = main.Size
                 end
             end)
-            UserInputService.InputEnded:Connect(function(input)
+            local resizeEnd = UserInputService.InputEnded:Connect(function(input)
                 if input.UserInputType == Enum.UserInputType.MouseButton1 then
                     resizing = false
                 end
             end)
-            UserInputService.InputChanged:Connect(function(input)
+            table.insert(conns, resizeEnd)
+            local resizeMove = UserInputService.InputChanged:Connect(function(input)
                 if resizing and input.UserInputType == Enum.UserInputType.MouseMovement then
                     local delta = input.Position - resizeStart
                     main.Size = UDim2.new(
@@ -551,13 +575,15 @@ function Haja:CreateWindow(cfg)
                     )
                 end
             end)
+            table.insert(conns, resizeMove)
         end
     end
 
     -- Search bar in content area (filters elements across tabs? For now, current tab)
+    -- search sits left of the minimize/close buttons so it never overlaps them
     local searchBox = make("TextBox", {
-        Position = UDim2.new(1, -150, 0, 12),
-        Size = UDim2.fromOffset(135, 28),
+        Position = UDim2.new(1, -198, 0, 12),
+        Size = UDim2.fromOffset(130, 28),
         AnchorPoint = Vector2.new(1, 0),
         BackgroundColor3 = T.Element,
         BorderSizePixel = 0,
@@ -593,7 +619,21 @@ function Haja:CreateWindow(cfg)
     Window._tabs = {}
     Window._mobile = mobile
     Window._minimized = false
+    Window._visible = true
     Window._theme = T
+    Window._conns = conns
+
+    closeWindow = function()
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        table.clear(conns)
+        gui:Destroy()
+        for i, w in ipairs(Windows) do
+            if w == Window then
+                table.remove(Windows, i)
+                break
+            end
+        end
+    end
 
     -- Loading config into Flags
     local saved = loadConfig(Window._cfgKey)
@@ -623,8 +663,7 @@ function Haja:CreateWindow(cfg)
     end)
 
     function Window:Destroy()
-        gui:Destroy()
-        for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+        closeWindow()
     end
 
     function Window:SetTitle(text)
@@ -642,10 +681,12 @@ end
 
 function Window:CreateTab(name, icon)
     local T = self._theme
+    local conns = self._conns or {}
     local tab = {}
     tab._name = name
     tab._active = false
     tab._elements = {}
+    tab._conns = conns
 
     -- Sidebar button
     local btn = make("TextButton", {
@@ -951,7 +992,10 @@ function Window:CreateTab(name, icon)
 
         local function set(v, fire)
             state = v
-            if cfg.Flag then Flags[cfg.Flag] = v end
+            if cfg.Flag then
+                Flags[cfg.Flag] = v
+                scheduleAutoSave()
+            end
             tween(knobTrack, { BackgroundColor3 = v and T.Accent or T.ElementHover })
             tween(knob, { Position = v and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 2, 0.5, 0) })
             if fire and cfg.Callback then task.spawn(cfg.Callback, v) end
@@ -987,6 +1031,8 @@ function Window:CreateTab(name, icon)
         frame.Size = UDim2.new(1, 0, 0, 56)
 
         local min, max = cfg.Min or 0, cfg.Max or 100
+        if max <= min then max = min + 1 end
+        local span = max - min
         local value = cfg.Default or min
         if cfg.Flag and Flags[cfg.Flag] ~= nil then value = Flags[cfg.Flag] end
         value = math.clamp(value, min, max)
@@ -1017,7 +1063,7 @@ function Window:CreateTab(name, icon)
         corner(track, 3)
 
         local fill = make("Frame", {
-            Size = UDim2.new((value - min) / (max - min), 0, 1, 0),
+            Size = UDim2.new((value - min) / span, 0, 1, 0),
             BackgroundColor3 = T.Accent,
             BorderSizePixel = 0,
             Parent = track,
@@ -1026,7 +1072,7 @@ function Window:CreateTab(name, icon)
 
         local knob = make("Frame", {
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new((value - min) / (max - min), 0, 0.5, 0),
+            Position = UDim2.new((value - min) / span, 0, 0.5, 0),
             Size = UDim2.fromOffset(14, 14),
             BackgroundColor3 = Color3.fromRGB(255, 255, 255),
             BorderSizePixel = 0,
@@ -1039,8 +1085,11 @@ function Window:CreateTab(name, icon)
         local function set(v, fire)
             v = math.clamp(v, min, max)
             value = v
-            if cfg.Flag then Flags[cfg.Flag] = v end
-            local alpha = (v - min) / (max - min)
+            if cfg.Flag then
+                Flags[cfg.Flag] = v
+                scheduleAutoSave()
+            end
+            local alpha = (v - min) / span
             tween(fill, { Size = UDim2.new(alpha, 0, 1, 0) }, 0.06)
             knob.Position = UDim2.new(alpha, 0, 0.5, 0)
             valueLabel.Text = tostring(round(v, cfg.Increment or 1)) .. (cfg.Suffix or "")
@@ -1050,7 +1099,7 @@ function Window:CreateTab(name, icon)
         local dragging = false
         local function inputToValue(x)
             local rel = (x - track.AbsolutePosition.X) / track.AbsoluteSize.X
-            set(min + (max - min) * math.clamp(rel, 0, 1), true)
+            set(min + span * math.clamp(rel, 0, 1), true)
         end
 
         track.InputBegan:Connect(function(input)
@@ -1059,16 +1108,18 @@ function Window:CreateTab(name, icon)
                 inputToValue(input.Position.X)
             end
         end)
-        UserInputService.InputChanged:Connect(function(input)
+        local slideConn = UserInputService.InputChanged:Connect(function(input)
             if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
                 inputToValue(input.Position.X)
             end
         end)
-        UserInputService.InputEnded:Connect(function(input)
+        table.insert(conns, slideConn)
+        local slideEnd = UserInputService.InputEnded:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = false
             end
         end)
+        table.insert(conns, slideEnd)
 
         local api = {}
         function api:Set(v) set(v, true) end
@@ -1165,7 +1216,10 @@ function Window:CreateTab(name, icon)
                 corner(optBtn, 5)
                 optBtn.Activated:Connect(function()
                     selected = opt
-                    if cfg.Flag then Flags[cfg.Flag] = opt end
+                    if cfg.Flag then
+                        Flags[cfg.Flag] = opt
+                        scheduleAutoSave()
+                    end
                     valueBtn.Text = tostring(opt)
                     if cfg.Callback then task.spawn(cfg.Callback, opt) end
                     open = false
@@ -1188,6 +1242,10 @@ function Window:CreateTab(name, icon)
             if table.find(options, opt) then
                 selected = opt
                 valueBtn.Text = tostring(opt)
+                if cfg.Flag then
+                    Flags[cfg.Flag] = opt
+                    scheduleAutoSave()
+                end
                 if cfg.Callback then task.spawn(cfg.Callback, opt) end
                 rebuild()
             end
@@ -1232,7 +1290,7 @@ function Window:CreateTab(name, icon)
             keyBtn.BackgroundColor3 = T.Accent
         end)
 
-        connect(UserInputService.InputBegan, function(input, gpe)
+        local kbConn = UserInputService.InputBegan:Connect(function(input, gpe)
             if listening and not gpe then
                 local nk = input.KeyCode
                 if nk ~= Enum.KeyCode.Unknown then
@@ -1252,6 +1310,7 @@ function Window:CreateTab(name, icon)
                 if cfg.Callback then task.spawn(cfg.Callback) end
             end
         end)
+        table.insert(conns, kbConn)
 
         local api = {}
         function api:Set(k) key = k; keyBtn.Text = k.Name end
@@ -1287,14 +1346,26 @@ function Window:CreateTab(name, icon)
         corner(box, 7)
         padding(box, 8)
 
+        -- restore a previously saved value (if any)
+        if cfg.Flag and Flags[cfg.Flag] ~= nil then
+            box.Text = tostring(Flags[cfg.Flag])
+        end
+
+        -- fire the callback once per text change, on enter OR on blur
+        local lastText = box.Text
         local function commit()
             local t = box.Text
-            if cfg.Flag then Flags[cfg.Flag] = t end
+            if t == lastText then return end
+            lastText = t
+            if cfg.Flag then
+                Flags[cfg.Flag] = t
+                scheduleAutoSave()
+            end
             if cfg.Callback then task.spawn(cfg.Callback, t) end
         end
 
-        box.FocusLost:Connect(function(enterPressed)
-            if enterPressed then commit() end
+        box.FocusLost:Connect(function()
+            commit()
         end)
 
         table.insert(self._elements, { _name = cfg.Name, _frame = frame })
@@ -1310,6 +1381,9 @@ function Window:CreateTab(name, icon)
         label.Text = cfg.Name or "Color"
 
         local color = cfg.Default or Color3.fromRGB(124, 92, 255)
+        if cfg.Flag and Flags[cfg.Flag] ~= nil and typeof(Flags[cfg.Flag]) == "Color3" then
+            color = Flags[cfg.Flag]
+        end
 
         local preview = make("TextButton", {
             AnchorPoint = Vector2.new(1, 0.5),
@@ -1363,6 +1437,10 @@ function Window:CreateTab(name, icon)
                 sw.Activated:Connect(function()
                     color = c
                     preview.BackgroundColor3 = c
+                    if cfg.Flag then
+                        Flags[cfg.Flag] = c
+                        scheduleAutoSave()
+                    end
                     if cfg.Callback then task.spawn(cfg.Callback, c) end
                 end)
             end
@@ -1378,6 +1456,10 @@ function Window:CreateTab(name, icon)
         function api:Set(c)
             color = c
             preview.BackgroundColor3 = c
+            if cfg.Flag then
+                Flags[cfg.Flag] = c
+                scheduleAutoSave()
+            end
             if cfg.Callback then task.spawn(cfg.Callback, c) end
         end
         function api:Get() return color end
@@ -1505,27 +1587,9 @@ function Haja:Notify(cfg)
 end
 
 --////////////////////////////////////////////////////////////////////////
---  SAVE CONFIG ON EXIT (client-safe — game:BindToClose is server-only,
---  so on a LocalScript/executor we save via autosave loop instead)
+--  CONFIG SAVING (client-side — game:BindToClose is server-only,
+--  so flags auto-save shortly after every change instead of on leave)
 --////////////////////////////////////////////////////////////////////////
-
-pcall(function()
-    game:BindToClose(function()
-        for _, w in ipairs(Windows) do
-            saveConfig(w._cfgKey)
-        end
-    end)
-end)
-
--- autosave loop (works everywhere: client + executor)
-task.spawn(function()
-    while true do
-        task.wait(5)
-        for _, w in ipairs(Windows) do
-            saveConfig(w._cfgKey)
-        end
-    end
-end)
 
 -- expose helpers
 Haja.SaveConfig = function(key)

@@ -129,7 +129,7 @@ Misc:CreateTextbox({
     end,
 })
 
-Misc:CreateLabel({ Text = "Haja UI v1.0.0 · Made with <3" })
+Misc:CreateLabel({ Text = "Haja UI v" .. Haja.Version .. " · Made with <3" })
 
 Misc:CreateButton({
     Name     = "Notify Test",
