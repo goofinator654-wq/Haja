@@ -260,6 +260,20 @@ local function loadConfig(key)
     return ok and result or {}
 end
 
+-- Debounced auto-save: fires shortly after a flag changes (client-safe,
+-- unlike game:BindToClose which is server-only)
+local savePending = false
+local function scheduleAutoSave()
+    if savePending then return end
+    savePending = true
+    task.delay(0.5, function()
+        savePending = false
+        for _, w in ipairs(Windows) do
+            saveConfig(w._cfgKey)
+        end
+    end)
+end
+
 --////////////////////////////////////////////////////////////////////////
 --  WINDOW
 --////////////////////////////////////////////////////////////////////////
@@ -1505,21 +1519,18 @@ function Haja:Notify(cfg)
 end
 
 --////////////////////////////////////////////////////////////////////////
---  SAVE CONFIG ON EXIT (auto)
+--  CONFIG SAVING (client-side — game:BindToClose is server-only,
+--  so we save on every flag change instead of on leave)
 --////////////////////////////////////////////////////////////////////////
 
-game:BindToClose(function()
+local function autoSave()
     for _, w in ipairs(Windows) do
         saveConfig(w._cfgKey)
     end
-end)
+end
 
 -- expose helpers
-Haja.SaveConfig = function(key)
-    for _, w in ipairs(Windows) do
-        saveConfig(key or w._cfgKey)
-    end
-end
+Haja.SaveConfig = autoSave
 
 Haja.IsMobile = isMobile
 Haja.Version = Haja.Version

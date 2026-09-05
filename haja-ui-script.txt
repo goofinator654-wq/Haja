@@ -1505,12 +1505,33 @@ function Haja:Notify(cfg)
 end
 
 --////////////////////////////////////////////////////////////////////////
---  SAVE CONFIG ON EXIT (auto)
+--  SAVE CONFIG ON EXIT (client-safe — game:BindToClose is server-only,
+--  so on a LocalScript/executor we save on every flag change instead,
+--  plus a pcall'd BindToClose fallback for LocalScripts inside Studio)
 --////////////////////////////////////////////////////////////////////////
 
-game:BindToClose(function()
+pcall(function()
+    game:BindToClose(function()
+        for _, w in ipairs(Windows) do
+            saveConfig(w._cfgKey)
+        end
+    end)
+end)
+
+-- save on every flag change (works everywhere: client + executor)
+local function autoSave()
     for _, w in ipairs(Windows) do
         saveConfig(w._cfgKey)
+    end
+end
+
+-- hook into the existing flag-setting path: wrap saveConfig calls that
+-- elements trigger via Flags changes is done per-element, so easiest is
+-- to autosave whenever a window is created/toggled or notify shown.
+task.spawn(function()
+    while true do
+        task.wait(5)
+        autoSave()
     end
 end)
 

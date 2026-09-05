@@ -1505,12 +1505,25 @@ function Haja:Notify(cfg)
 end
 
 --////////////////////////////////////////////////////////////////////////
---  SAVE CONFIG ON EXIT (auto)
+--  SAVE CONFIG ON EXIT (client-safe — game:BindToClose is server-only,
+--  so on a LocalScript/executor we save via autosave loop instead)
 --////////////////////////////////////////////////////////////////////////
 
-game:BindToClose(function()
-    for _, w in ipairs(Windows) do
-        saveConfig(w._cfgKey)
+pcall(function()
+    game:BindToClose(function()
+        for _, w in ipairs(Windows) do
+            saveConfig(w._cfgKey)
+        end
+    end)
+end)
+
+-- autosave loop (works everywhere: client + executor)
+task.spawn(function()
+    while true do
+        task.wait(5)
+        for _, w in ipairs(Windows) do
+            saveConfig(w._cfgKey)
+        end
     end
 end)
 
