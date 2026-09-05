@@ -85,7 +85,7 @@ local LocalPlayer = Players.LocalPlayer
 local Haja = {}
 Haja.__index = Haja
 
-Haja.Version = "1.0.0"
+Haja.Version = "1.0.1"
 Haja.Themes  = {
     Midnight  = {
         Accent        = Color3.fromRGB(124, 92, 255),
